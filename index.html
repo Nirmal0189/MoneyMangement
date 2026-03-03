@@ -14,6 +14,34 @@
   <link rel="stylesheet" href="style.css">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+
+  <!-- Firebase SDK -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+    import { getDatabase, ref, set, onValue, push, update, remove } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+
+    const firebaseConfig = {
+      apiKey: "AIzaSyDNIljZdhasiySmY9NKk-ZC7st9_nHV3AM",
+      authDomain: "moneymanagement-d2337.firebaseapp.com",
+      projectId: "moneymanagement-d2337",
+      storageBucket: "moneymanagement-d2337.firebasestorage.app",
+      messagingSenderId: "812681544119",
+      appId: "1:812681544119:web:bbb15fb4ac466851d4a832"
+    };
+
+    // Initialize Firebase
+    const app = initializeApp(firebaseConfig);
+    const db = getDatabase(app);
+
+    // Make db and functions available globally for app.js
+    window.firebaseDB = db;
+    window.firebaseRef = ref;
+    window.firebaseSet = set;
+    window.firebaseOnValue = onValue;
+    window.firebasePush = push;
+    window.firebaseUpdate = update;
+    window.firebaseRemove = remove;
+  </script>
 </head>
 
 <body>
