@@ -83,10 +83,13 @@
     const toastContainer = $('#toastContainer');
 
     // ── State ──
+    let currentUser = null;
     let transactions = [];
     let currentType = 'credit';
     let deleteTargetId = null;
     let totalBalance = 0;
+    let authMode = 'login'; // 'login' or 'register'
+    let profileImage = null;
 
     // ── Helpers ──
     function uuid() {
@@ -126,29 +129,55 @@
     }
 
     // ── Data Layer ──
+    // ── Data Layer ──
     function load() {
-        try {
-            transactions = JSON.parse(localStorage.getItem(STORAGE_KEY)) || [];
-        } catch { transactions = []; }
+        if (!currentUser) return;
+
+        const userPath = `users/${currentUser.uid}`;
+
+        // Setup Realtime Listeners for the current user
+        window.firebaseOnValue(window.firebaseRef(window.firebaseDB, `${userPath}/transactions`), (snapshot) => {
+            const data = snapshot.val();
+            transactions = data || [];
+            refreshCurrentView();
+        });
+
+        window.firebaseOnValue(window.firebaseRef(window.firebaseDB, `${userPath}/balance`), (snapshot) => {
+            const data = snapshot.val();
+            totalBalance = data || 0;
+            renderTotalBalance();
+            refreshCurrentView();
+        });
+
+        window.firebaseOnValue(window.firebaseRef(window.firebaseDB, `${userPath}/profileImage`), (snapshot) => {
+            profileImage = snapshot.val();
+            syncAvatars();
+        });
     }
 
     function save() {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(transactions));
+        // Updated directly in actions
     }
 
     function addTransaction(tx) {
+        if (!currentUser) return;
         transactions.push(tx);
-        save();
+        window.firebaseSet(window.firebaseRef(window.firebaseDB, `users/${currentUser.uid}/transactions`), transactions);
     }
 
     function updateTransaction(id, data) {
+        if (!currentUser) return;
         const idx = transactions.findIndex(t => t.id === id);
-        if (idx !== -1) { Object.assign(transactions[idx], data); save(); }
+        if (idx !== -1) {
+            Object.assign(transactions[idx], data);
+            window.firebaseSet(window.firebaseRef(window.firebaseDB, `users/${currentUser.uid}/transactions`), transactions);
+        }
     }
 
     function deleteTransaction(id) {
+        if (!currentUser) return;
         transactions = transactions.filter(t => t.id !== id);
-        save();
+        window.firebaseSet(window.firebaseRef(window.firebaseDB, `users/${currentUser.uid}/transactions`), transactions);
     }
 
     function getByMonth(ym) {
@@ -157,13 +186,12 @@
 
     // ── Total Balance ──
     function loadBalance() {
-        try {
-            totalBalance = parseFloat(localStorage.getItem(BALANCE_KEY)) || 0;
-        } catch { totalBalance = 0; }
+        // Handled by load() listener
     }
 
     function saveBalance() {
-        localStorage.setItem(BALANCE_KEY, totalBalance.toString());
+        if (!currentUser) return;
+        window.firebaseSet(window.firebaseRef(window.firebaseDB, `users/${currentUser.uid}/balance`), totalBalance);
     }
 
     function adjustBalance(type, amount) {
@@ -180,28 +208,35 @@
     }
 
     function resetBalance() {
-        if (confirm('Are you sure you want to reset the total balance to ₹0.00? This cannot be undone.')) {
-            const amountToClear = totalBalance;
-            totalBalance = 0;
-            saveBalance();
-
-            // Log the reset as a transaction for traceability
-            addTransaction({
-                id: uuid(),
-                type: amountToClear >= 0 ? 'debit' : 'credit',
-                amount: Math.abs(amountToClear),
-                date: new Date().toISOString().split('T')[0],
-                category: 'Balance Reset',
-                description: 'Total balance reset to zero'
-            });
-
-            renderTotalBalance();
-            toast('Total balance has been reset to zero.', 'info');
-            refreshCurrentView();
-        }
+        const resetOverlay = $('#resetOverlay');
+        if (resetOverlay) resetOverlay.classList.add('show');
     }
 
+    function confirmReset() {
+        const amountToClear = totalBalance;
+        totalBalance = 0;
+        saveBalance();
 
+        // Log the reset as a transaction for traceability
+        addTransaction({
+            id: uuid(),
+            type: amountToClear >= 0 ? 'debit' : 'credit',
+            amount: Math.abs(amountToClear),
+            date: new Date().toISOString().split('T')[0],
+            category: 'Balance Reset',
+            description: 'Total balance reset to zero'
+        });
+
+        renderTotalBalance();
+        closeResetModal();
+        refreshCurrentView();
+        toast('Balance reset to ₹0.00', 'info');
+    }
+
+    function closeResetModal() {
+        const resetOverlay = $('#resetOverlay');
+        if (resetOverlay) resetOverlay.classList.remove('show');
+    }
 
     function renderTotalBalance() {
         const el = $('#totalBalanceValue');
@@ -231,17 +266,24 @@
         if (link) link.classList.add('active');
 
         // Close mobile sidebar
-        sidebar.classList.remove('open');
-        hamburger.classList.remove('open');
-        overlay.classList.remove('show');
+        closeSidebar();
 
         if (view === 'dashboard') renderDashboard();
         else if (view === 'transactions') renderTransactions();
         else if (view === 'reports') renderReports();
+        else if (view === 'profile') renderProfile();
     }
 
     function initRouter() {
+        if (!currentUser) {
+            navigate('auth');
+            return;
+        }
         const hash = (location.hash || '#dashboard').replace('#', '');
+        if (hash === 'auth') {
+            navigate('dashboard');
+            return;
+        }
         navigate(hash);
     }
 
@@ -416,6 +458,61 @@
         reportDebitsFoot.innerHTML = debits.length > 0
             ? `<tr><td colspan="3"><strong>Total Debits</strong></td><td class="text-right amount-debit"><strong>-${formatCurrency(totalDebits)}</strong></td></tr>`
             : '';
+    }
+
+    // ── Profile ──
+    function renderProfile() {
+        if (!currentUser) return;
+
+        const detailEmail = $('#detailEmail');
+        const detailUid = $('#detailUid');
+        const detailCreated = $('#detailCreated');
+        const profileEmail = $('#profileEmail');
+
+        if (profileEmail) profileEmail.textContent = currentUser.email;
+        if (detailEmail) detailEmail.textContent = currentUser.email;
+        if (detailUid) detailUid.textContent = currentUser.uid;
+
+        syncAvatars();
+
+        // Creation time
+        if (detailCreated && currentUser.metadata && currentUser.metadata.creationTime) {
+            const date = new Date(currentUser.metadata.creationTime);
+            detailCreated.textContent = date.toLocaleDateString('en-IN', {
+                day: '2-digit',
+                month: 'short',
+                year: 'numeric'
+            });
+        }
+    }
+
+    function syncAvatars() {
+        if (!currentUser) return;
+
+        const initials = currentUser.email.charAt(0).toUpperCase();
+        const sidebarEmail = $('#sidebarUserEmail');
+        if (sidebarEmail) sidebarEmail.textContent = currentUser.email;
+
+        const instances = [
+            { initials: $('#avatarInitials'), img: $('#avatarImage') },
+            { initials: $('#sidebarAvatarInitials'), img: $('#sidebarAvatarImage') },
+            { initials: $('#mobileAvatarInitials'), img: $('#mobileAvatarImage') }
+        ];
+
+        instances.forEach(inst => {
+            if (inst.initials) {
+                inst.initials.textContent = initials;
+                inst.initials.classList.toggle('hidden', !!profileImage);
+            }
+            if (inst.img) {
+                if (profileImage) {
+                    inst.img.src = profileImage;
+                    inst.img.classList.remove('hidden');
+                } else {
+                    inst.img.classList.add('hidden');
+                }
+            }
+        });
     }
 
     // ── PDF Generation ──
@@ -695,6 +792,87 @@
         return div.innerHTML;
     }
 
+    // ── Authentication Handlers ──
+    function handleAuthSubmit(e) {
+        e.preventDefault();
+        const email = $('#authEmail').value.trim();
+        const password = $('#authPassword').value;
+
+        if (!email || !password) {
+            toast('Please enter both email and password.', 'error');
+            return;
+        }
+
+        const btn = $('#authSubmitBtn');
+        const originalText = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = authMode === 'login' ? 'Signing In...' : 'Creating Account...';
+
+        if (authMode === 'login') {
+            window.firebaseLogin(window.firebaseAuth, email, password)
+                .then(() => {
+                    toast('Welcome back!', 'success');
+                })
+                .catch(err => {
+                    toast(err.message, 'error');
+                })
+                .finally(() => {
+                    btn.disabled = false;
+                    btn.textContent = originalText;
+                });
+        } else {
+            window.firebaseRegister(window.firebaseAuth, email, password)
+                .then(() => {
+                    toast('Account created successfully!', 'success');
+                })
+                .catch(err => {
+                    toast(err.message, 'error');
+                })
+                .finally(() => {
+                    btn.disabled = false;
+                    btn.textContent = originalText;
+                });
+        }
+    }
+
+    function toggleAuth(e) {
+        e.preventDefault();
+        authMode = authMode === 'login' ? 'register' : 'login';
+
+        const title = $('#authTitle');
+        const subtitle = $('#authSubtitle');
+        const submitBtn = $('#authSubmitBtn');
+        const toggleBtnText = $('#toggleAuthText');
+
+        if (authMode === 'register') {
+            title.textContent = 'Create Account';
+            subtitle.textContent = 'Start managing your money today';
+            submitBtn.textContent = 'Create Account';
+            toggleBtnText.innerHTML = 'Already have an account? <a href="#" id="toggleAuthBtn">Sign In</a>';
+        } else {
+            title.textContent = 'Welcome Back';
+            subtitle.textContent = 'Please enter your details to sign in';
+            submitBtn.textContent = 'Sign In';
+            toggleBtnText.innerHTML = "Don't have an account? <a href='#' id='toggleAuthBtn'>Create one</a>";
+        }
+
+        // Re-attach listener since we replaced innerHTML
+        $('#toggleAuthBtn').addEventListener('click', toggleAuth);
+    }
+
+    function handleLogout(e) {
+        if (e) e.preventDefault();
+        if (confirm('Are you sure you want to logout?')) {
+            window.firebaseLogout(window.firebaseAuth)
+                .then(() => {
+                    toast('Logged out successfully.', 'info');
+                })
+                .catch(err => {
+                    toast('Error logging out: ' + err.message, 'error');
+                });
+        }
+    }
+
     // ── Event Delegation for Table Actions ──
     document.addEventListener('click', (e) => {
         const editBtn = e.target.closest('[data-edit]');
@@ -731,19 +909,44 @@
             navigate('transactions');
         });
 
+        $('#nav-profile-sidebar').addEventListener('click', (e) => {
+            e.preventDefault();
+            location.hash = 'profile';
+            navigate('profile');
+        });
+
+        $('#nav-profile-mobile').addEventListener('click', (e) => {
+            e.preventDefault();
+            location.hash = 'profile';
+            navigate('profile');
+        });
+
         window.addEventListener('hashchange', initRouter);
 
-        // Mobile sidebar
-        hamburger.addEventListener('click', () => {
-            sidebar.classList.toggle('open');
-            hamburger.classList.toggle('open');
-            overlay.classList.toggle('show');
-        });
-        overlay.addEventListener('click', () => {
+        // Sidebar Actions
+        function openSidebar() {
+            sidebar.classList.add('open');
+            hamburger.classList.add('open');
+            overlay.classList.add('show');
+            document.body.style.overflow = 'hidden';
+        }
+
+        function closeSidebar() {
             sidebar.classList.remove('open');
             hamburger.classList.remove('open');
             overlay.classList.remove('show');
+            document.body.style.overflow = '';
+        }
+
+        // Mobile sidebar
+        hamburger.addEventListener('click', () => {
+            if (sidebar.classList.contains('open')) {
+                closeSidebar();
+            } else {
+                openSidebar();
+            }
         });
+        overlay.addEventListener('click', closeSidebar);
 
         // Dashboard month change
         dashboardMonth.addEventListener('change', renderDashboard);
@@ -761,6 +964,49 @@
         addTransactionBtn.addEventListener('click', () => openModal(null));
 
         // Modal
+        overlay.addEventListener('click', closeSidebar);
+
+        // ── Sidebar Swipe Gesture ──
+        let touchStartX = 0;
+        let touchStartY = 0;
+
+        // Swipe to close (on sidebar and overlay)
+        [sidebar, overlay].forEach(el => {
+            el.addEventListener('touchstart', (e) => {
+                touchStartX = e.changedTouches[0].screenX;
+                touchStartY = e.changedTouches[0].screenY;
+            }, { passive: true });
+
+            el.addEventListener('touchend', (e) => {
+                const touchEndX = e.changedTouches[0].screenX;
+                const touchEndY = e.changedTouches[0].screenY;
+                handleSwipeClose(touchStartX, touchEndX, touchStartY, touchEndY);
+            }, { passive: true });
+        });
+
+        // Swipe to open (from left edge of screen)
+        document.addEventListener('touchstart', (e) => {
+            touchStartX = e.changedTouches[0].screenX;
+            touchStartY = e.changedTouches[0].screenY;
+        }, { passive: true });
+
+        document.addEventListener('touchend', (e) => {
+            const touchEndX = e.changedTouches[0].screenX;
+            const touchEndY = e.changedTouches[0].screenY;
+            handleSwipeOpen(touchStartX, touchEndX, touchStartY, touchEndY);
+        }, { passive: true });
+
+        function handleSwipeClose(start, end, startY, endY) {
+            // Horizontal swipe only, no large vertical scroll
+            if (Math.abs(startY - endY) > 50) return;
+            if (start - end > 50) closeSidebar();
+        }
+
+        function handleSwipeOpen(start, end, startY, endY) {
+            if (Math.abs(startY - endY) > 50) return;
+            // From left edge (x < 30) to right
+            if (start < 30 && end - start > 50) openSidebar();
+        }
         modalClose.addEventListener('click', closeModal);
         modalCancelBtn.addEventListener('click', closeModal);
         modalOverlay.addEventListener('click', (e) => { if (e.target === modalOverlay) closeModal(); });
@@ -778,6 +1024,28 @@
         deleteConfirmBtn.addEventListener('click', confirmDelete);
         deleteOverlay.addEventListener('click', (e) => { if (e.target === deleteOverlay) closeDeleteModal(); });
 
+        // Authentication
+        $('#authForm').addEventListener('submit', handleAuthSubmit);
+        $('#toggleAuthBtn').addEventListener('click', toggleAuth);
+        $('#nav-logout').addEventListener('click', handleLogout);
+
+        // Firebase Auth State Listener
+        window.firebaseOnAuthStateChanged(window.firebaseAuth, (user) => {
+            currentUser = user;
+            if (user) {
+                document.body.classList.remove('auth-mode');
+                load(); // Start listening for user-specific data
+                renderProfile(); // Initialize avatars and user info
+                initRouter();
+            } else {
+                document.body.classList.add('auth-mode');
+                transactions = [];
+                totalBalance = 0;
+                profileImage = null;
+                navigate('auth');
+            }
+        });
+
         // PDF download
         downloadPdfBtn.addEventListener('click', generatePDF);
 
@@ -786,9 +1054,25 @@
             if (e.key === 'Escape') {
                 if (modalOverlay.classList.contains('show')) closeModal();
                 if (deleteOverlay.classList.contains('show')) closeDeleteModal();
+                if ($('#resetOverlay').classList.contains('show')) closeResetModal();
                 if ($('#balanceOverlay').classList.contains('show')) closeBalanceModal();
             }
         });
+
+        // ── Reset Balance Modal ──
+        const resetOverlay = $('#resetOverlay');
+        const resetClose = $('#resetClose');
+        const resetCancelBtn = $('#resetCancelBtn');
+        const resetConfirmBtn = $('#resetConfirmBtn');
+
+        if (resetOverlay) {
+            resetClose.addEventListener('click', closeResetModal);
+            resetCancelBtn.addEventListener('click', closeResetModal);
+            resetConfirmBtn.addEventListener('click', confirmReset);
+            resetOverlay.addEventListener('click', (e) => {
+                if (e.target === resetOverlay) closeResetModal();
+            });
+        }
 
         // ── Wallet Balance Modal ──
         const balanceOverlay = $('#balanceOverlay');
@@ -873,6 +1157,46 @@
             closeBalanceModal();
             refreshCurrentView();
         });
+
+        // ── Profile Image Upload ──
+        const profileAvatarContainer = $('#profileAvatarContainer');
+        const avatarInput = $('#avatarInput');
+
+        if (profileAvatarContainer && avatarInput) {
+            profileAvatarContainer.addEventListener('click', () => {
+                avatarInput.click();
+            });
+
+            avatarInput.addEventListener('change', (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+
+                if (!file.type.startsWith('image/')) {
+                    toast('Please select an image file.', 'error');
+                    return;
+                }
+
+                if (file.size > 2 * 1024 * 1024) { // 2MB limit
+                    toast('Image size should be less than 2MB.', 'error');
+                    return;
+                }
+
+                const reader = new FileReader();
+                reader.onload = (event) => {
+                    const base64 = event.target.result;
+                    if (!currentUser) return;
+
+                    window.firebaseSet(window.firebaseRef(window.firebaseDB, `users/${currentUser.uid}/profileImage`), base64)
+                        .then(() => {
+                            toast('Profile photo updated!', 'success');
+                        })
+                        .catch(err => {
+                            toast('Error updating photo: ' + err.message, 'error');
+                        });
+                };
+                reader.readAsDataURL(file);
+            });
+        }
 
         // Initial render
         initRouter();
